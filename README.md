@@ -9,8 +9,10 @@ A 16-bit-style animated retelling of the pilot, drawn and scored entirely in cod
 
 ## Status
 
-Built in stages. **Stage 1 (done): the engine and the look, plus scene 0 (title) and scene 1 (Briggs Grade cold open).**
-Stages 2 to 6 (Michigan, Calumet, Texas, Scotland, the sound pass and the export script) are still to come.
+Built in stages.
+- **Stage 1 (done):** the engine and the look; scene 0 (title) and scene 1 (Briggs Grade cold open).
+- **Stage 2 (done):** Michigan, scenes 2 to 6: in the car, Hautamaki Creek, the deer, Dad's Hump (slow motion) and One point nine. Runs to 2:44 so far.
+- Stages 3 to 6 (Calumet, Texas, Scotland, the sound pass and the export script) are still to come.
 
 ## Open and play
 
@@ -40,6 +42,8 @@ The bar hides itself while the film plays; move the mouse to bring it back.
 
 - **Canvas:** native 320×180, scaled up by a whole-number factor and letterboxed, `image-rendering: pixelated`. Everything is drawn on whole pixels.
 - **Clock:** one global timeline of scenes `{ id, title, duration, draw(t) }`. The picture is quantised to 12 fps; every frame is a pure function of time, so playback and export are deterministic. There's no `Math.random()`: randomness comes from a seeded hash.
+- **People and portraits:** one parametric builder makes every small body sprite (build, hair, hat, coat pattern, poses such as walk, cheer, hold); close-up portraits (about 40×48) swap eyes and mouths for expressions and talking. Close-ups can be drawn at 2×.
+- **Shots:** the in-car cut-away (pseudo-3D road in the windscreen, the brothers below), side-on scenes with parallax, top-down shots using pre-rendered rotations, and a whole-number 2× camera for closer shots.
 - **Sprites:** string maps (`"..kk.."`) with a palette lookup, or char grids painted by code, cached to small canvases. Cars pitch by shearing column by column, which keeps the pixel grid intact.
 - **Text:** a hand-made 5×7 bitmap font (capitals, lower case, digits, punctuation, `£ $ ° #`), speech bubbles with a pixel border and tail, typed on at 30 characters a second.
 - **Sound:** Web Audio, all synthesised: engine notes tied to the car, type blips, the landing crunch, the crow, wind. The full chiptune score comes in the sound pass.
