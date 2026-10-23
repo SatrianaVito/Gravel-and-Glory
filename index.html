@@ -1,0 +1,888 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gravel &amp; Glory, Episode 1</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  #ui { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 12px 10px;
+        font: 12px/1.2 ui-monospace, Menlo, Consolas, monospace; color: #cfd8e3;
+        background: linear-gradient(transparent, rgba(0,0,0,.75)); transition: opacity .35s; user-select: none; }
+  #ui.hide { opacity: 0; }
+  #meta { display: flex; justify-content: space-between; margin-bottom: 6px; }
+  #bar { position: relative; height: 6px; background: #2a3140; cursor: pointer; }
+  #fill { position: absolute; left: 0; top: 0; bottom: 0; background: #e8963a; }
+  .tick { position: absolute; top: -3px; bottom: -3px; width: 1px; background: #9fb3c8; }
+  #hint { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+          font: 14px ui-monospace, Menlo, Consolas, monospace; color: #e9f0f5; background: rgba(11,16,32,.85);
+          border: 2px solid #e9f0f5; padding: 10px 16px; pointer-events: none; letter-spacing: 1px; }
+  body.export #ui, body.export #hint { display: none; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c" width="320" height="180"></canvas></div>
+<div id="hint">CLICK OR PRESS SPACE TO PLAY</div>
+<div id="ui">
+  <div id="meta"><span id="scn"></span><span id="clock"></span></div>
+  <div id="bar"><div id="fill"></div></div>
+</div>
+<script>
+'use strict';
+/* =====================================================================
+   GRAVEL & GLORY, EPISODE 1: "IF BUFFUM CAN DO IT"
+   A pixel-art short. Everything is drawn and synthesised in code.
+   Native canvas 320x180, sprite animation at 12 fps, one global clock.
+   ===================================================================== */
+
+const W = 320, H = 180, FPS = 12;
+const EXPORT = /[?&]export=1/.test(location.search);
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d', { alpha: false });
+ctx.imageSmoothingEnabled = false;
+if (EXPORT) document.body.classList.add('export');
+
+/* ---------------------------------------------------------------------
+   Palette
+   --------------------------------------------------------------------- */
+const P = {
+  // Michigan night and snow
+  night: '#0b1020', forest: '#14261f', birch: '#d8d4c8', snow: '#e9f0f5', snowSh: '#9fb3c8', nickel: '#5f6b78',
+  // Loretta
+  yellow: '#e8d77a', mud: '#6b4a2b', lamp: '#fff6d0',
+  // Texas
+  caliche: '#e2c9a0', sky: '#6fb6e8', hot: '#fff3e0', mesquite: '#5d6b3a', pool: '#2ec4c4',
+  // Scotland
+  slate: '#3a4450', rain: '#8fa3b5', sodium: '#e8963a', clyde: '#566270',
+  // people
+  skin1: '#f0c8a0', skin2: '#c98e62', skin3: '#7a4b2e', red: '#c8102e', plaidBlk: '#1d1a1c', denim: '#3f5f8f',
+  // accents
+  blaze: '#ff6a1a', xred: '#d22b2b', xgreen: '#2f8f3a', xyellow: '#f2c84b', gold: '#c9a227',
+  // utility
+  ink: '#15131a', black: '#000000', white: '#ffffff', paper: '#f4f1e8',
+  sky0: '#3c4550', sky2: '#7d8690', sky3: '#9a9b9c', ridge: '#27353a', ridge2: '#1b2a28',
+  gravel: '#7d6e5e', gravelL: '#a39582', gravelD: '#4f4438', earth: '#2b231d', earthL: '#3d3128',
+  grass: '#6e5f3e', bark: '#5a4632', barkD: '#3b2d20', barkL: '#8a7152', birchD: '#3a3733',
+};
+
+/* ---------------------------------------------------------------------
+   Deterministic randomness, maths, tweens
+   --------------------------------------------------------------------- */
+function rnd(i) { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453123; return x - Math.floor(x); }
+const R = Math.round;
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, k) => a + (b - a) * k;
+const ease = {
+  lin: k => k,
+  inOut: k => k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2,
+  out: k => 1 - (1 - k) * (1 - k),
+  in: k => k * k,
+  back: k => { const c = 1.9; return 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2); },
+};
+// keyframes: [[t, value], ...] -> value at t (numbers or arrays of numbers)
+function key(t, frames, e = ease.inOut) {
+  if (t <= frames[0][0]) return frames[0][1];
+  for (let i = 1; i < frames.length; i++) {
+    const [t1, v1] = frames[i];
+    if (t <= t1) {
+      const [t0, v0] = frames[i - 1];
+      const k = (frames[i][2] || e)((t - t0) / (t1 - t0));
+      return Array.isArray(v0) ? v0.map((v, j) => lerp(v, v1[j], k)) : lerp(v0, v1, k);
+    }
+  }
+  return frames[frames.length - 1][1];
+}
+const prog = (t, a, b) => clamp((t - a) / (b - a), 0, 1);
+const frameNo = t => Math.floor(t * FPS + 1e-6);
+function shake(t, t0, dur, amp) {
+  if (t < t0 || t > t0 + dur) return [0, 0];
+  const k = 1 - (t - t0) / dur, f = frameNo(t);
+  return [R((rnd(f * 7.13) - .5) * 2 * amp * k), R((rnd(f * 3.71 + 9) - .5) * 2 * amp * k)];
+}
+
+/* ---------------------------------------------------------------------
+   Drawing primitives (everything on whole pixels)
+   --------------------------------------------------------------------- */
+function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(R(x), R(y), R(w), R(h)); }
+function px(x, y, c) { ctx.fillStyle = c; ctx.fillRect(R(x), R(y), 1, 1); }
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const patCache = {};
+function pat(c, level) {
+  const l = clamp(R(level * 16), 0, 16), k = c + l;
+  if (patCache[k]) return patCache[k];
+  const o = document.createElement('canvas'); o.width = o.height = 4;
+  const g = o.getContext('2d'); g.fillStyle = c;
+  for (let i = 0; i < 16; i++) if (BAYER[i] < l) g.fillRect(i & 3, i >> 2, 1, 1);
+  return (patCache[k] = ctx.createPattern(o, 'repeat'));
+}
+// ordered-dither fill: level 0 = nothing, 1 = solid
+function dith(x, y, w, h, c, level) {
+  if (level <= 0.03) return;
+  if (level >= 0.97) return rect(x, y, w, h, c);
+  ctx.fillStyle = pat(c, level); ctx.fillRect(R(x), R(y), R(w), R(h));
+}
+// vertical gradient through a list of colours, dithered between bands
+function vgrad(y0, y1, cols, x0 = -8, w = W + 16) {
+  const n = cols.length - 1, span = (y1 - y0) / n;
+  for (let s = 0; s < n; s++) {
+    const a = y0 + s * span;
+    rect(x0, a, w, Math.ceil(span) + 1, cols[s]);
+    const steps = 6;
+    for (let j = 0; j < steps; j++) {
+      const yy = a + span * (j / steps);
+      dith(x0, yy, w, Math.ceil(span / steps) + 1, cols[s + 1], (j + .5) / steps);
+    }
+  }
+}
+// filled disc made of rows
+function disc(cx, cy, r, c, level = 1) {
+  for (let dy = -r; dy <= r; dy++) {
+    const hw = Math.floor(Math.sqrt(r * r - dy * dy) + .3);
+    dith(cx - hw, cy + dy, hw * 2 + 1, 1, c, level);
+  }
+}
+function fadeBlack(level) { if (level > 0) dith(-8, -8, W + 16, H + 16, P.black, level); }
+function frame(x, y, w, h, c) { rect(x, y, w, 1, c); rect(x, y + h - 1, w, 1, c); rect(x, y, 1, h, c); rect(x + w - 1, y, 1, h, c); }
+
+/* ---------------------------------------------------------------------
+   Sprites: string maps + a palette lookup, cached to small canvases
+   --------------------------------------------------------------------- */
+const CM = { // default char -> colour
+  k: P.ink, K: '#2a2833', w: '#25323f', g: '#6d8396', l: P.lamp, L: '#d9c98a', y: P.yellow, Y: '#c4b25c',
+  m: P.mud, M: '#4a321d', r: P.red, h: '#9aa0a6', H: '#d5d9dc', t: '#111114', n: '#1b1b1b',
+  b: P.bark, B: P.barkL, d: P.barkD, s: P.snow, S: P.snowSh, o: P.blaze, e: '#3a3a44', E: '#5a5a66',
+};
+const SPR = {};
+function makeSprite(name, rows, map = {}) {
+  const h = rows.length, w = Math.max(...rows.map(r => r.length));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  for (let y = 0; y < h; y++) for (let x = 0; x < rows[y].length; x++) {
+    const ch = rows[y][x]; if (ch === '.' || ch === ' ') continue;
+    g.fillStyle = map[ch] || CM[ch] || '#ff00ff'; g.fillRect(x, y, 1, 1);
+  }
+  const f = document.createElement('canvas'); f.width = w; f.height = h;
+  const fg = f.getContext('2d'); fg.translate(w, 0); fg.scale(-1, 1); fg.drawImage(c, 0, 0);
+  return (SPR[name] = { c, f, w, h });
+}
+// a char grid we can paint into with code, then turn into a sprite
+function grid(w, h) {
+  const g = Array.from({ length: h }, () => Array(w).fill('.'));
+  g.set = (x, y, c) => { if (x >= 0 && x < w && y >= 0 && y < h) g[y][x] = c; };
+  g.get = (x, y) => (x >= 0 && x < w && y >= 0 && y < h) ? g[y][x] : '.';
+  g.hl = (x0, x1, y, c) => { for (let x = x0; x <= x1; x++) g.set(x, y, c); };
+  g.box = (x0, y0, x1, y1, c) => { for (let y = y0; y <= y1; y++) g.hl(x0, x1, y, c); };
+  g.rows = () => g.map(r => r.join(''));
+  return g;
+}
+function spr(name, x, y, flip = false) { const s = SPR[name]; ctx.drawImage(flip ? s.f : s.c, R(x), R(y)); }
+// draw a sprite sheared column by column: keeps the pixel grid while pitching a car
+function sprShear(name, x, y, slope, flip = false) {
+  const s = SPR[name], img = flip ? s.f : s.c, cx = s.w / 2;
+  x = R(x); y = R(y);
+  for (let i = 0; i < s.w; i++) ctx.drawImage(img, i, 0, 1, s.h, x + i, y + R((i - cx) * slope), 1, s.h);
+}
+
+/* ---------------------------------------------------------------------
+   5x7 bitmap font (descenders drop one row)
+   --------------------------------------------------------------------- */
+const GLYPHS = {
+  A: '.xxx.|x...x|x...x|xxxxx|x...x|x...x|x...x', B: 'xxxx.|x...x|x...x|xxxx.|x...x|x...x|xxxx.',
+  C: '.xxx.|x...x|x....|x....|x....|x...x|.xxx.', D: 'xxxx.|x...x|x...x|x...x|x...x|x...x|xxxx.',
+  E: 'xxxxx|x....|x....|xxxx.|x....|x....|xxxxx', F: 'xxxxx|x....|x....|xxxx.|x....|x....|x....',
+  G: '.xxx.|x...x|x....|x.xxx|x...x|x...x|.xxxx', H: 'x...x|x...x|x...x|xxxxx|x...x|x...x|x...x',
+  I: 'xxx|.x.|.x.|.x.|.x.|.x.|xxx', J: '..xxx|...x.|...x.|...x.|...x.|x..x.|.xx..',
+  K: 'x...x|x..x.|x.x..|xx...|x.x..|x..x.|x...x', L: 'x....|x....|x....|x....|x....|x....|xxxxx',
+  M: 'x...x|xx.xx|x.x.x|x.x.x|x...x|x...x|x...x', N: 'x...x|xx..x|x.x.x|x.x.x|x..xx|x...x|x...x',
+  O: '.xxx.|x...x|x...x|x...x|x...x|x...x|.xxx.', P: 'xxxx.|x...x|x...x|xxxx.|x....|x....|x....',
+  Q: '.xxx.|x...x|x...x|x...x|x.x.x|x..x.|.xx.x', R: 'xxxx.|x...x|x...x|xxxx.|x.x..|x..x.|x...x',
+  S: '.xxxx|x....|x....|.xxx.|....x|....x|xxxx.', T: 'xxxxx|..x..|..x..|..x..|..x..|..x..|..x..',
+  U: 'x...x|x...x|x...x|x...x|x...x|x...x|.xxx.', V: 'x...x|x...x|x...x|x...x|x...x|.x.x.|..x..',
+  W: 'x...x|x...x|x...x|x.x.x|x.x.x|x.x.x|.x.x.', X: 'x...x|x...x|.x.x.|..x..|.x.x.|x...x|x...x',
+  Y: 'x...x|x...x|.x.x.|..x..|..x..|..x..|..x..', Z: 'xxxxx|....x|...x.|..x..|.x...|x....|xxxxx',
+  a: '.....|.....|.xxx.|....x|.xxxx|x...x|.xxxx', b: 'x....|x....|xxxx.|x...x|x...x|x...x|xxxx.',
+  c: '....|....|.xxx|x...|x...|x...|.xxx', d: '....x|....x|.xxxx|x...x|x...x|x...x|.xxxx',
+  e: '.....|.....|.xxx.|x...x|xxxxx|x....|.xxx.', f: '..xx|.x..|xxxx|.x..|.x..|.x..|.x..',
+  g: '.....|.....|.xxxx|x...x|x...x|.xxxx|....x|.xxx.', h: 'x....|x....|xxxx.|x...x|x...x|x...x|x...x',
+  i: '.x.|...|xx.|.x.|.x.|.x.|xxx', j: '..x|...|.xx|..x|..x|..x|x.x|.x.',
+  k: 'x...|x...|x..x|x.x.|xx..|x.x.|x..x', l: 'xx.|.x.|.x.|.x.|.x.|.x.|xxx',
+  m: '.....|.....|xx.x.|x.x.x|x.x.x|x.x.x|x...x', n: '.....|.....|xxxx.|x...x|x...x|x...x|x...x',
+  o: '.....|.....|.xxx.|x...x|x...x|x...x|.xxx.', p: '.....|.....|xxxx.|x...x|x...x|xxxx.|x....|x....',
+  q: '.....|.....|.xxxx|x...x|x...x|.xxxx|....x|....x', r: '....|....|x.xx|xx..|x...|x...|x...',
+  s: '.....|.....|.xxxx|x....|.xxx.|....x|xxxx.', t: '.x..|.x..|xxxx|.x..|.x..|.x..|..xx',
+  u: '.....|.....|x...x|x...x|x...x|x..xx|.xx.x', v: '.....|.....|x...x|x...x|x...x|.x.x.|..x..',
+  w: '.....|.....|x...x|x...x|x.x.x|x.x.x|.x.x.', x: '.....|.....|x...x|.x.x.|..x..|.x.x.|x...x',
+  y: '.....|.....|x...x|x...x|x...x|.xxxx|....x|.xxx.', z: '.....|.....|xxxxx|...x.|..x..|.x...|xxxxx',
+  0: '.xxx.|x...x|x..xx|x.x.x|xx..x|x...x|.xxx.', 1: '..x..|.xx..|..x..|..x..|..x..|..x..|.xxx.',
+  2: '.xxx.|x...x|....x|...x.|..x..|.x...|xxxxx', 3: 'xxxx.|....x|....x|.xxx.|....x|....x|xxxx.',
+  4: '...x.|..xx.|.x.x.|x..x.|xxxxx|...x.|...x.', 5: 'xxxxx|x....|xxxx.|....x|....x|x...x|.xxx.',
+  6: '.xxx.|x....|x....|xxxx.|x...x|x...x|.xxx.', 7: 'xxxxx|....x|...x.|..x..|.x...|.x...|.x...',
+  8: '.xxx.|x...x|x...x|.xxx.|x...x|x...x|.xxx.', 9: '.xxx.|x...x|x...x|.xxxx|....x|....x|.xxx.',
+  '.': '.|.|.|.|.|.|x', ',': '..|..|..|..|..|.x|.x|x.', '!': 'x|x|x|x|x|.|x', '?': '.xxx.|x...x|....x|...x.|..x..|.....|..x..',
+  "'": 'x|x|.|.|.|.|.', '"': 'x.x|x.x|...|...|...|...|...', '-': '...|...|...|xxx|...|...|...',
+  ':': '.|x|.|.|.|x|.', ';': '..|.x|..|..|..|.x|.x|x.', '(': '.x|x.|x.|x.|x.|x.|.x', ')': 'x.|.x|.x|.x|.x|.x|x.',
+  '/': '....x|...x.|...x.|..x..|.x...|.x...|x....', '&': '.xx..|x..x.|x.x..|.x...|x.x.x|x..x.|.xx.x',
+  '£': '..xx.|.x..x|.x...|xxx..|.x...|.x...|xxxxx', '$': '..x..|.xxxx|x.x..|.xxx.|..x.x|xxxx.|..x..',
+  '°': '.x.|x.x|.x.|...|...|...|...', '#': '.x.x.|xxxxx|.x.x.|.x.x.|.x.x.|xxxxx|.x.x.',
+  '+': '.....|..x..|..x..|xxxxx|..x..|..x..|.....', '%': 'xx..x|xx.x.|...x.|..x..|.x...|.x.xx|x..xx',
+  '*': '.....|x.x.x|.xxx.|xxxxx|.xxx.|x.x.x|.....', '=': '....|....|xxxx|....|xxxx|....|....',
+  '_': '.....|.....|.....|.....|.....|.....|.....|xxxxx', '’': 'x|x|.|.|.|.|.',
+};
+const FONT = {};
+for (const ch in GLYPHS) {
+  const rows = GLYPHS[ch].split('|');
+  let l = 9, r = -1;
+  rows.forEach(row => { for (let i = 0; i < row.length; i++) if (row[i] === 'x') { l = Math.min(l, i); r = Math.max(r, i); } });
+  if (r < 0) { l = 0; r = 0; }
+  FONT[ch] = { w: r - l + 1, px: rows.map(row => [...row.slice(l, r + 1)].map(c => c === 'x')) };
+}
+const LINE_H = 9, SPACE_W = 3;
+function normText(s) { return s.replace(/…/g, '...').replace(/[“”]/g, '"').replace(/‘/g, "'").replace(/—|–/g, '-'); }
+function charW(ch) { return ch === ' ' ? SPACE_W : (FONT[ch] || FONT['?']).w; }
+function textW(s, sc = 1) { s = normText(s); let w = 0; for (const ch of s) w += (charW(ch) + 1) * sc; return Math.max(0, w - sc); }
+// colour may be a function of glyph row (for gradients) ; returns x after text
+function glyph(ch, x, y, c, sc = 1) {
+  if (ch === ' ') return x + (SPACE_W + 1) * sc;
+  const g = FONT[ch] || FONT['?'];
+  for (let r = 0; r < g.px.length; r++) {
+    ctx.fillStyle = typeof c === 'function' ? c(r) : c;
+    const row = g.px[r];
+    for (let i = 0; i < row.length; i++) if (row[i]) ctx.fillRect(x + i * sc, y + r * sc, sc, sc);
+  }
+  return x + (g.w + 1) * sc;
+}
+function text(s, x, y, c, sc = 1, n = Infinity) {
+  s = normText(s); x = R(x); y = R(y);
+  let i = 0;
+  for (const ch of s) { if (i++ >= n) break; x = glyph(ch, x, y, c, sc); }
+  return x;
+}
+function textC(s, cx, y, c, sc = 1, n) { return text(s, cx - textW(s, sc) / 2, y, c, sc, n); }
+function shadowText(s, x, y, c, sh = P.night, sc = 1, n) { text(s, x + sc, y + sc, sh, sc, n); return text(s, x, y, c, sc, n); }
+function wrap(s, maxW) {
+  s = normText(s);
+  const out = [];
+  for (const para of s.split('\n')) {
+    let line = '';
+    for (const word of para.split(' ')) {
+      const t = line ? line + ' ' + word : word;
+      if (textW(t) > maxW && line) { out.push(line); line = word; } else line = t;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------------------
+   Speech bubbles and text cards
+   --------------------------------------------------------------------- */
+const TYPE_CPS = 30;
+// tip = the speaker's mouth; the box floats above (or below) with a pixel tail
+function bubble(str, tipX, tipY, lt, o = {}) {
+  const lines = wrap(str, o.w || 118);
+  const tw = Math.max(...lines.map(l => textW(l)));
+  const bw = tw + 8, bh = lines.length * LINE_H + 4;
+  const below = o.below || false;
+  let bx = R(tipX + (o.dx || 0) - bw / 2);
+  bx = clamp(bx, 2, W - bw - 2);
+  const by = below ? R(tipY + 6) : R(tipY - 6 - bh);
+  const fill = o.fill || P.paper, ink = o.ink || P.ink, edge = o.edge || P.ink;
+  // box with clipped corners
+  rect(bx + 1, by, bw - 2, bh, fill); rect(bx, by + 1, bw, bh - 2, fill);
+  rect(bx + 1, by - 1, bw - 2, 1, edge); rect(bx + 1, by + bh, bw - 2, 1, edge);
+  rect(bx - 1, by + 1, 1, bh - 2, edge); rect(bx + bw, by + 1, 1, bh - 2, edge);
+  px(bx, by, edge); px(bx + bw - 1, by, edge); px(bx, by + bh - 1, edge); px(bx + bw - 1, by + bh - 1, edge);
+  if (o.shout) { px(bx - 2, by - 2, edge); px(bx + bw + 1, by - 2, edge); px(bx - 2, by + bh + 1, edge); px(bx + bw + 1, by + bh + 1, edge); }
+  // tail
+  const tx = clamp(R(tipX), bx + 4, bx + bw - 5);
+  for (let i = 0; i < 5; i++) {
+    const yy = below ? by - 1 - i : by + bh + i;
+    const cx = R(lerp(tx, tipX, i / 4)), w = 5 - i, x0 = cx - Math.floor(w / 2);
+    if (i < 4) { rect(x0, yy, w, 1, fill); px(x0 - 1, yy, edge); px(x0 + w, yy, edge); }
+    else px(cx, yy, edge);
+  }
+  // typed text
+  let n = Math.floor(lt * (o.cps || TYPE_CPS));
+  AU.type(str, n);
+  let y = by + 2;
+  for (const l of lines) {
+    if (n <= 0) break;
+    text(l, bx + 4, y, ink, 1, n);
+    n -= l.length + 1; y += LINE_H;
+  }
+}
+// a line spoken between t0 and t1 (scene time)
+function say(t, t0, t1, str, x, y, o) { if (t >= t0 && t < t1) bubble(str, x, y, t - t0, o); }
+// full-screen card: white bitmap text on dark, fading in and out with a dither
+function card(t, t0, t1, lines, o = {}) {
+  if (t < t0 || t >= t1) return false;
+  rect(-8, -8, W + 16, H + 16, o.bg || P.night);
+  const sc = o.sc || 1, lh = (LINE_H + 3) * sc;
+  let y = R(H / 2 - (lines.length * lh) / 2) + (o.dy || 0);
+  const n = o.typed ? Math.floor((t - t0) * TYPE_CPS) : Infinity;
+  let used = 0;
+  for (const l of lines) {
+    if (o.typed) AU.type(lines.join('|'), n);
+    textC(l, W / 2, y, o.color || P.snow, sc, n - used);
+    used += l.length; y += lh;
+  }
+  if (o.draw) o.draw(t - t0);
+  const f = Math.max(1 - prog(t, t0, t0 + .35), prog(t, t1 - .35, t1));
+  fadeBlack(f);
+  return true;
+}
+
+/* ---------------------------------------------------------------------
+   Weather: stateless particles (pure functions of time)
+   --------------------------------------------------------------------- */
+function snowfall(t, n, seed, o = {}) {
+  const sp = o.speed || 14, drift = o.drift || 3;
+  for (let i = 0; i < n; i++) {
+    const a = rnd(seed + i * 3.1), b = rnd(seed + i * 5.7), c = rnd(seed + i * 9.3);
+    const v = sp * (.55 + c * .9);
+    const y = ((b * (H + 10) + t * v) % (H + 10)) - 5;
+    const x = (((a * (W + 20) + Math.sin(t * (.6 + c) + i) * 3 + t * drift * c) % (W + 20)) + W + 20) % (W + 20) - 10;
+    const col = c > .7 ? P.snow : c > .35 ? P.snowSh : P.nickel;
+    rect(x, y, c > .88 ? 2 : 1, c > .88 ? 2 : 1, o.color || col);
+  }
+}
+
+/* ---------------------------------------------------------------------
+   Audio (Web Audio, all synthesised). Scenes set continuous params each
+   frame and fire one-shots through cue(); export mode stays silent.
+   --------------------------------------------------------------------- */
+const AU = {
+  ac: null, out: null, muted: false, live: false, typed: {},
+  frame: { engine: 0, rpm: 0, wind: 0 },
+  init() {
+    if (this.ac || EXPORT) return;
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    const ac = this.ac = new AC();
+    this.out = ac.createGain(); this.out.gain.value = this.muted ? 0 : .8; this.out.connect(ac.destination);
+    // white-noise buffer (seeded LCG, not Math.random)
+    const len = ac.sampleRate * 2, buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
+    let s = 1234567; for (let i = 0; i < len; i++) { s = (s * 1103515245 + 12345) >>> 0; d[i] = (s / 4294967296) * 2 - 1; }
+    this.noiseBuf = buf;
+    // engine: saw + square through a lowpass
+    const eg = this.eg = ac.createGain(); eg.gain.value = 0;
+    const lp = this.elp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 6;
+    const o1 = this.eo1 = ac.createOscillator(); o1.type = 'sawtooth';
+    const o2 = this.eo2 = ac.createOscillator(); o2.type = 'square';
+    o1.connect(lp); o2.connect(lp); lp.connect(eg); eg.connect(this.out); o1.start(); o2.start();
+    // wind bed
+    const wn = ac.createBufferSource(); wn.buffer = buf; wn.loop = true;
+    const wf = ac.createBiquadFilter(); wf.type = 'bandpass'; wf.frequency.value = 500; wf.Q.value = .7;
+    const wg = this.wg = ac.createGain(); wg.gain.value = 0;
+    wn.connect(wf); wf.connect(wg); wg.connect(this.out); wn.start();
+  },
+  setMuted(m) { this.muted = m; if (this.out) this.out.gain.setTargetAtTime(m ? 0 : .8, this.ac.currentTime, .02); },
+  beginFrame() { this.frame.engine = 0; this.frame.rpm = 0; this.frame.wind = 0; },
+  endFrame() {
+    if (!this.ac) return;
+    const now = this.ac.currentTime, f = this.frame, on = this.live ? 1 : 0;
+    const hz = 70 + f.rpm * 260;
+    this.eo1.frequency.setTargetAtTime(hz, now, .03); this.eo2.frequency.setTargetAtTime(hz * .501, now, .03);
+    this.elp.frequency.setTargetAtTime(300 + f.rpm * 2400, now, .03);
+    this.eg.gain.setTargetAtTime(f.engine * .16 * on, now, .05);
+    this.wg.gain.setTargetAtTime(f.wind * .12 * on, now, .2);
+  },
+  engine(vol, rpm) { this.frame.engine = Math.max(this.frame.engine, vol); this.frame.rpm = Math.max(this.frame.rpm, rpm); },
+  wind(v) { this.frame.wind = Math.max(this.frame.wind, v); },
+  tone(freq, dur, type = 'square', vol = .05, slide = 0, at = 0) {
+    if (!this.ac || !this.live) return;
+    const ac = this.ac, t0 = ac.currentTime + at, o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t0);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t0 + dur);
+    g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(.0001, t0 + dur);
+    o.connect(g); g.connect(this.out); o.start(t0); o.stop(t0 + dur + .02);
+  },
+  noise(dur, freq, vol = .3, type = 'lowpass', q = 1, at = 0, sweep = 0) {
+    if (!this.ac || !this.live) return;
+    const ac = this.ac, t0 = ac.currentTime + at, s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    s.buffer = this.noiseBuf; f.type = type; f.frequency.setValueAtTime(freq, t0); f.Q.value = q;
+    if (sweep) f.frequency.exponentialRampToValueAtTime(Math.max(40, freq + sweep), t0 + dur);
+    g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(.0001, t0 + dur);
+    s.connect(f); f.connect(g); g.connect(this.out); s.start(t0, (at * 7.3) % 1.5); s.stop(t0 + dur + .05);
+  },
+  type(id, n) {
+    const p = this.typed[id] || 0;
+    if (n > p) { const ch = normText(id)[n - 1]; if (ch && ch !== ' ') this.tone(1200 + (n % 3) * 90, .03, 'square', .025); }
+    this.typed[id] = n;
+  },
+  crunch() { this.noise(.35, 900, .5, 'lowpass', 1, 0, -700); this.noise(.12, 3000, .18, 'highpass'); this.tone(60, .25, 'triangle', .25, -30); },
+  caw() { this.tone(620, .14, 'sawtooth', .05, -220); this.tone(600, .16, 'sawtooth', .05, -240, .2); },
+  flap() { this.noise(.08, 1400, .06, 'bandpass', 2); },
+};
+
+/* ---------------------------------------------------------------------
+   Timeline
+   --------------------------------------------------------------------- */
+const SCENES = []; let TOTAL = 0;
+function addScene(o) { o.start = TOTAL; TOTAL += o.duration; SCENES.push(o); }
+function sceneIndexAt(T) { for (let i = SCENES.length - 1; i >= 0; i--) if (T >= SCENES[i].start) return i; return 0; }
+const G = { prev: -1, cueOn: false, local: 0 };
+// fires once when playback crosses scene time a
+function cue(t, a) { return G.cueOn && G.prevLocal < a && t >= a; }
+
+/* =====================================================================
+   CAST & CARS
+   ===================================================================== */
+
+/* ---- Loretta, the Datsun 510 (side view, facing right) ---- */
+const LOR = { w: 44, h: 13, axles: [9, 34] };
+(function buildLoretta() {
+  const g = grid(LOR.w, LOR.h);
+  g.hl(12, 28, 0, 'k');
+  for (let r = 1; r <= 3; r++) {
+    const L = 12 - r, Rt = 28 + r;
+    g.set(L, r, 'k'); g.hl(L + 1, 16, r, 'w'); g.set(17, r, 'k'); g.hl(18, Rt - 1, r, 'w'); g.set(Rt, r, 'k');
+    g.set(L + 1, r, 'g'); g.set(18 + (r - 1), r, 'g');
+  }
+  g.hl(1, 41, 4, 'k');
+  for (let r = 5; r <= 11; r++) { g.set(0, r, 'k'); g.hl(1, 41, r, 'y'); g.set(42, r, 'k'); }
+  g.hl(1, 41, 11, 'Y'); g.hl(1, 41, 12, 'k');
+  // bumpers + tail lamp
+  g.set(0, 9, 'h'); g.set(0, 10, 'h'); g.set(43, 9, 'h'); g.set(43, 10, 'h'); g.set(1, 6, 'r'); g.set(1, 7, 'r');
+  // the lamp bar: a round pod ahead of the grille
+  g.set(43, 5, 'k'); g.set(43, 6, 'l'); g.set(43, 7, 'l'); g.set(43, 8, 'k'); g.set(42, 6, 'L'); g.set(42, 7, 'L');
+  // body crease and door seams
+  g.hl(2, 40, 8, 'Y');
+  for (let r = 5; r <= 10; r++) { g.set(17, r, 'Y'); g.set(30, r, 'Y'); }
+  g.set(28, 6, 'k'); g.set(29, 6, 'k');
+  // big crooked #7
+  g.hl(21, 24, 5, 'n'); g.set(25, 5, 'n'); g.set(24, 6, 'n'); g.set(23, 7, 'n'); g.set(23, 8, 'n'); g.set(22, 9, 'n'); g.set(19, 6, 'n'); g.set(19, 8, 'n'); g.hl(18, 20, 7, 'n');
+  // hand-lettering (a few unreadable pixels): KOSKI SERVICE & REPAIR
+  const lettering = 'k.kk.k.k..kk.k.k.k';
+  for (let i = 0; i < lettering.length; i++) { if (lettering[i] === 'k') g.set(18 + (i % 12), 9 + Math.floor(i / 12), i % 2 ? 'K' : 'k'); }
+  // mud: heavier low and at the back
+  for (let y = 6; y <= 11; y++) for (let x = 1; x <= 41; x++) {
+    const depth = (y - 6) / 5, back = 1 - x / 44;
+    const v = rnd(x * 13.7 + y * 71.3);
+    if (v < depth * .85 + back * .25 - .15) g.set(x, y, v < .18 ? 'M' : 'm');
+  }
+  // wheel arches
+  for (const ax of LOR.axles) for (let y = 7; y <= 12; y++) for (let x = ax - 6; x <= ax + 6; x++) {
+    const d = Math.hypot(x - ax, y - 12.5);
+    if (d < 5.2) g.set(x, y, '.'); else if (d < 6.2) g.set(x, y, 'k');
+  }
+  makeSprite('loretta', g.rows());
+})();
+makeSprite('wheel0', ['..ttt..', '.ttttt.', 'tthhhtt', 'tthHhtt', 'tthhhtt', '.ttttt.', '..ttt..']);
+makeSprite('wheel1', ['..ttt..', '.ttttt.', 'tthHhtt', 'tthhhtt', 'tthhhtt', '.ttttt.', '..ttt..']);
+makeSprite('wheel2', ['..ttt..', '.ttttt.', 'tthhhtt', 'tthhhtt', 'tthhHtt', '.ttttt.', '..ttt..']);
+
+// draw Loretta: (x, gy) = centre x and ground line under the wheels
+function drawLoretta(x, gy, o = {}) {
+  const slope = o.slope || 0, sus = o.sus || 0, spin = o.spin || 0;
+  const x0 = R(x - LOR.w / 2);
+  const wf = 'wheel' + (Math.floor(spin) % 3 + 3) % 3;
+  for (const ax of LOR.axles) {
+    const dy = R((ax - LOR.w / 2) * slope) + (o.air ? 1 : 0);
+    spr(wf, x0 + ax - 3, R(gy) - 7 + dy);
+  }
+  sprShear('loretta', x0, R(gy) - 16 + sus, slope);
+}
+
+/* ---- the crow ---- */
+makeSprite('crowSit', [
+  '...kkk......',
+  '..kkKkk.....',
+  'ekkkkkkk....',
+  '..kkkkkkk...',
+  '...kkKkkkk..',
+  '...kkkKkkkkk',
+  '....kkkkk..k',
+  '.....k.k....',
+  '.....e.e....',
+]);
+makeSprite('crowLook', [
+  '......kkk...',
+  '.....kkKkke.',
+  '....kkkkk...',
+  '..kkkkkkk...',
+  '.kkkKkkkk...',
+  'kkkkkKkkk...',
+  'k..kkkkk....',
+  '....k.k.....',
+  '....e.e.....',
+]);
+makeSprite('crowUp', [
+  'kk.........kk',
+  '.kkk.....kkk.',
+  '..kkkk.kkkk..',
+  '...kkkKkkk...',
+  '..ekkkkkk....',
+  '.....kkk.....',
+]);
+makeSprite('crowDn', [
+  '.............',
+  '....kkkkk....',
+  '..ekkkKkkk...',
+  '..kkkk.kkkk..',
+  '.kkk.....kkk.',
+  'kk.........kk',
+]);
+function drawCrow(x, y, mode, t, flip = false) {
+  if (mode === 'sit') spr('crowSit', x - 6, y - 9, flip);
+  else if (mode === 'look') spr('crowLook', x - 6, y - 9, flip);
+  else spr(frameNo(t) % 2 ? 'crowUp' : 'crowDn', x - 6, y - 6, flip);
+}
+
+/* =====================================================================
+   SET PIECES
+   ===================================================================== */
+
+/* ---- forest bits ---- */
+function hemlock(x, base, h, c, cHi) {
+  x = R(x); base = R(base);
+  for (let r = 0; r < h; r++) {
+    const tier = (r % 5) / 5;
+    const hw = Math.floor(1 + (r / h) * h * .32 * (.6 + tier * .5));
+    rect(x - hw, base - h + r, hw * 2 + 1, 1, c);
+    if (cHi && r % 5 === 4) rect(x - hw, base - h + r, 1, 1, cHi);
+  }
+  rect(x, base - h - 1, 1, 2, c);
+}
+function birch(x, base, h, o = {}) {
+  x = R(x); base = R(base);
+  const w = o.w || 2;
+  rect(x, base - h, w, h, o.c || P.birch);
+  if (!o.flat) rect(x + w - 1, base - h, 1, h, o.sh || '#a9a59a');
+  for (let i = 0; i < h; i += 3) {
+    const v = rnd(x * 3.1 + i * 1.7);
+    if (v < .45) rect(x + (v < .2 ? 0 : 1), base - h + i, v < .1 ? 2 : 1, 1, o.mark || P.birchD);
+  }
+  // bare November twigs
+  for (let i = 0; i < 4; i++) {
+    const by = base - h + 4 + i * Math.floor(h / 6), dir = i % 2 ? 1 : -1, len = 3 + R(rnd(x + i) * 4);
+    for (let j = 1; j <= len; j++) px(x + (dir > 0 ? w - 1 + j : -j), by - Math.floor(j / 2), o.twig || '#4a4640');
+  }
+}
+
+/* ---- Briggs Grade: road profile with the crest ---- */
+const BRIGGS = {
+  base: 142, crestX: 120,
+  roadY(x) {
+    if (x < 50) return this.base;
+    if (x < 120) { const k = (x - 50) / 70; return this.base - 22 * (k * k * (3 - 2 * k)); }
+    if (x < 146) { const k = (x - 120) / 26; return this.base - 22 * (1 - k * k * (3 - 2 * k)); }
+    return this.base;
+  },
+};
+const BRIGGS_TREES = (() => {
+  const far = [], mid = [], near = [];
+  for (let i = 0; i < 46; i++) far.push({ x: -10 + i * 7.6 + rnd(i) * 5, h: 18 + R(rnd(i + 50) * 16) });
+  for (let i = 0; i < 26; i++) mid.push({ x: -8 + i * 13.5 + rnd(i + 100) * 8, h: 30 + R(rnd(i + 150) * 28), birch: rnd(i + 200) < .42 });
+  return { far, mid, near };
+})();
+function drawBriggsBackdrop() {
+  // sky the colour of an old nickel, a thin cold warmth at the horizon
+  vgrad(-8, 112, [P.sky0, P.nickel, P.sky2, P.sky3]);
+  dith(-8, 100, W + 16, 6, '#b3a497', .25);
+  // long low cloud strokes
+  for (let i = 0; i < 9; i++) {
+    const cy = 14 + i * 9 + R(rnd(i + 40) * 4), cx = -20 + rnd(i + 60) * 300, cw = 50 + rnd(i + 80) * 110;
+    dith(cx, cy, cw, 2, i < 4 ? '#4a545f' : '#727c86', .5);
+    dith(cx + 8, cy + 2, cw * .7, 1, i < 4 ? '#4a545f' : '#727c86', .35);
+  }
+  // far ridge of hemlock
+  rect(-8, 104, W + 16, 12, P.ridge);
+  for (const tr of BRIGGS_TREES.far) hemlock(tr.x, 108, tr.h, P.ridge);
+  dith(-8, 96, W + 16, 20, P.nickel, .18);
+  // mid forest: hemlock and birch
+  rect(-8, 118, W + 16, 26, P.ridge2);
+  for (const tr of BRIGGS_TREES.mid) {
+    if (tr.birch) birch(tr.x, 134, tr.h + 10);
+    else hemlock(tr.x, 134, tr.h, P.forest, '#1f3a2e');
+  }
+}
+function drawBriggsRoad() {
+  for (let x = -8; x < W + 8; x++) {
+    const y = R(BRIGGS.roadY(x));
+    rect(x, y, 1, 2, rnd(x * 1.3) < .5 ? P.gravel : P.gravelL);
+    // first snow, on the crown of the road and nowhere else
+    px(x, y + 2, rnd(x * 2.9) < .78 ? P.snow : P.snowSh);
+    rect(x, y + 3, 1, 2, rnd(x * 4.1) < .6 ? P.gravel : P.gravelD);
+    rect(x, y + 5, 1, H - y, P.earth);
+    if (rnd(x * 5.3) < .3) px(x, y + 6 + R(rnd(x) * 4), P.earthL);
+  }
+}
+function drawBriggsForeground(t) {
+  // forest floor in front of the road
+  for (let x = -8; x < W + 8; x++) {
+    const top = 153 + R(Math.sin(x * .07) * 2 + rnd(x * .37) * 2);
+    rect(x, top, 1, H - top + 8, '#1a1612');
+    if (rnd(x * 7.7) < .35) rect(x, top - 1 - R(rnd(x * 2.2) * 3), 1, 2, P.grass);
+    if (rnd(x * .9 + 3) < .12) px(x, top + 2, P.snowSh);
+  }
+  // framing birches at the edges
+  birch(6, 186, 190, { w: 4 }); birch(14, 186, 160, { w: 2 });
+  birch(306, 186, 200, { w: 5 });
+  // the stump
+  const sx = 262, sy = 150;
+  rect(sx - 9, sy, 19, 22, P.bark); rect(sx - 11, sy + 14, 23, 10, P.bark);
+  rect(sx - 9, sy, 3, 24, P.barkD); rect(sx + 6, sy + 1, 3, 22, P.barkL);
+  for (let i = 0; i < 5; i++) rect(sx - 4 + i * 2 + (i % 2), sy + 3 + i * 3, 1, 5 + (i % 3) * 2, P.barkD);
+  rect(sx - 9, sy - 2, 19, 3, P.barkL); rect(sx - 7, sy - 2, 15, 1, '#b39672');
+  rect(sx - 4, sy - 1, 9, 1, '#a88a64'); px(sx, sy - 1, P.bark); px(sx - 2, sy - 1, '#c2a682');
+  rect(sx - 15, sy + 19, 6, 3, P.barkD); rect(sx + 10, sy + 18, 6, 3, P.barkD);
+  rect(sx - 7, sy - 3, 3, 1, P.snow); rect(sx + 3, sy - 3, 4, 1, P.snow);
+}
+
+/* =====================================================================
+   SCENES
+   ===================================================================== */
+
+/* ---- 0. Title ---- */
+addScene({
+  id: 'title', title: 'Title', duration: 8, section: 'michigan',
+  draw(t) {
+    rect(-8, -8, W + 16, H + 16, P.night);
+    vgrad(110, 180, [P.night, '#111a2c', '#17233a']);
+    // dark treeline
+    for (let i = 0; i < 40; i++) hemlock(-6 + i * 8.5 + rnd(i + 7) * 4, 182, 14 + R(rnd(i + 3) * 14), '#070b16');
+    snowfall(t, 70, 11, { speed: 12 });
+    const title = 'GRAVEL & GLORY', sc = 3;
+    let x = R(W / 2 - textW(title, sc) / 2);
+    const y0 = 56;
+    let i = 0;
+    for (const ch of title) {
+      const at = .8 + i * .2;
+      if (t >= at && ch !== ' ') {
+        const k = prog(t, at, at + .3), dy = R((1 - ease.back(k)) * -18);
+        const col = ch === '&' ? (r => r < 3 ? '#e8c64a' : P.gold) : (r => r < 2 ? P.white : r < 5 ? P.snow : P.snowSh);
+        glyph(ch, x + sc, y0 + dy + sc, '#05070e', sc);
+        glyph(ch, x, y0 + dy, col, sc);
+        if (cue(t, at)) AU.tone(220 * Math.pow(2, [0, 2, 4, 7, 9, 12][i % 6] / 12), .12, 'square', .03);
+      }
+      x += (charW(ch) + 1) * sc; i++;
+    }
+    // gold rule
+    const rw = R(key(t, [[3.8, 0], [4.6, 232]]));
+    if (rw > 0) { rect(W / 2 - rw / 2, 84, rw, 1, P.gold); rect(W / 2 - rw / 2 + 2, 85, Math.max(0, rw - 4), 1, '#7a6418'); }
+    if (t >= 4.7) textC('EPISODE 1: IF BUFFUM CAN DO IT', W / 2, 92, P.birch, 1, Math.floor((t - 4.7) * TYPE_CPS));
+    if (t >= 4.7) AU.type('EPISODE 1: IF BUFFUM CAN DO IT', Math.floor((t - 4.7) * TYPE_CPS));
+    // a distant engine screams: a lamp glint far down the valley
+    if (t > 6) {
+      AU.engine(key(t, [[6, 0], [7.6, .35]]), key(t, [[6, .55], [6.8, .8], [6.9, .6], [7.8, .9]]));
+      const gl = frameNo(t) % 3 === 0 ? 2 : 1;
+      if (t > 6.6) rect(R(key(t, [[6.6, 40], [8, 70]])), 166, gl, 1, P.lamp);
+    }
+    fadeBlack(Math.max(1 - prog(t, 0, .6), prog(t, 7.6, 8)));
+  },
+});
+
+/* ---- 1. Briggs Grade, the cold open ---- */
+const S1 = {
+  carIn: 5.6, speed: 150, vy: 84,
+  // car state at scene time t: x, ground y, pitch, airborne, suspension
+  car(t) {
+    const x = -40 + (t - this.carIn) * this.speed;
+    const lipX = BRIGGS.crestX;
+    if (x < lipX) {
+      const xr = x - 12, xf = x + 12;
+      const yr = BRIGGS.roadY(xr), yf = BRIGGS.roadY(xf);
+      return { x, gy: (yr + yf) / 2 + 1, slope: (yf - yr) / 24, air: false, sus: 0 };
+    }
+    // ballistic flight from the lip
+    const tLip = this.carIn + (lipX + 40) / this.speed, tau = t - tLip;
+    const y0 = BRIGGS.roadY(lipX) + 1, vy = S1.vy, g = 300;
+    const y = y0 - vy * tau + .5 * g * tau * tau;
+    const ground = BRIGGS.roadY(x) + 1;
+    if (y < ground) return { x, gy: y, slope: lerp(-.18, .08, clamp(tau / .7, 0, 1)), air: true, sus: 0 };
+    // landed: find landing time
+    const tl = this.landT();
+    const after = t - tl;
+    const sus = after < .5 ? R(Math.sin(after * 22) * 3 * (1 - after / .5)) : 0;
+    return { x, gy: ground, slope: after < .17 ? .04 : 0, air: false, sus: Math.max(-1, sus), landed: true };
+  },
+  landT() {
+    if (this._lt) return this._lt;
+    const tLip = this.carIn + (BRIGGS.crestX + 40) / this.speed;
+    for (let tau = 0.05; tau < 2; tau += 1 / 240) {
+      const x = BRIGGS.crestX + tau * this.speed;
+      const y = BRIGGS.roadY(BRIGGS.crestX) + 1 - this.vy * tau + 150 * tau * tau;
+      if (y >= BRIGGS.roadY(x) + 1) return (this._lt = tLip + tau);
+    }
+    return tLip + .6;
+  },
+  crow(t) {
+    // [x, y, mode, flip]
+    if (t < 4.7) return [262, 147, (t > 3.6 && t < 4.2) ? 'look' : 'sit', false];
+    if (t < 6.4) { const k = prog(t, 4.7, 6.4); return [R(lerp(262, 150, k)), R(lerp(146, -12, ease.in(k))), 'fly', false]; }
+    if (t < 9.4) return null;
+    if (t < 10.5) { const k = prog(t, 9.4, 10.5); return [R(lerp(370, 262, ease.out(k))), R(lerp(60, 147, ease.out(k))), 'fly', false]; }
+    if (t < 12.1) return [262, 147, (t > 10.9 && t < 11.3) || (t > 11.6 && t < 11.8) ? 'look' : 'sit', t > 11.3 && t < 11.6];
+    if (t < 13.6) { const k = prog(t, 12.1, 13.6); return [R(lerp(262, 340, k)), R(lerp(146, 20, ease.in(k))), 'fly', true]; }
+    return null;
+  },
+};
+addScene({
+  id: 'briggs', title: 'Briggs Grade', duration: 13.8, section: 'michigan',
+  draw(t) {
+    if (card(t, 0, 2.9, ['COPPER COUNTRY PRO RALLY.', 'KEWEENAW PENINSULA, MICHIGAN.', 'NOVEMBER 1982.'], { typed: false })) return;
+    const lt = S1.landT();
+    const [sx, sy] = shake(t, lt, .55, 3);
+    ctx.save(); ctx.translate(sx, sy);
+    drawBriggsBackdrop();
+    const c = S1.car(t);
+    const onScreen = c.x > -60 && c.x < W + 60;
+    // lamp beams blazing like a locomotive
+    if (onScreen) {
+      const lx = c.x + 22, ly = c.gy - 10 + R(22 * c.slope) + c.sus;
+      for (let i = 1; i < 90; i++) {
+        const spread = 1 + i * .16, yy = ly + i * c.slope * 1.2;
+        dith(lx + i, yy - spread, 1, spread * 2 + 1, P.lamp, i < 4 ? .8 : .42 - i / 210);
+        if (i < 40) dith(lx + i, yy - spread * .4, 1, spread * .8 + 1, P.lamp, .3 - i / 140);
+      }
+    }
+    drawBriggsRoad();
+    // lamp-lit gravel where the beams hit the road
+    if (onScreen && !c.air) for (let i = 6; i < 70; i += 1) { const x = c.x + 22 + i; dith(x, R(BRIGGS.roadY(x)), 1, 3, P.lamp, .45 - i / 160); }
+    // rooster tail of gravel off the rear wheel (stateless particles)
+    for (let k = 0; k < 90; k++) {
+      const te = S1.carIn + .2 + k * (1 / 30);
+      const age = t - te; if (age < 0 || age > 1.1) continue;
+      const ce = S1.car(te); if (ce.air) continue;
+      const boost = ce.landed && te - lt < .35 ? 1.8 : 1;
+      const ex = ce.x - 13, ey = ce.gy - 2;
+      const r1 = rnd(k * 3.3), r2 = rnd(k * 7.9);
+      const vx = -(40 + r1 * 70) * boost, vy = -(40 + r2 * 60) * boost;
+      const x = ex + vx * age, y = ey + vy * age + 160 * age * age;
+      const gnd = BRIGGS.roadY(x) + 4;
+      if (y > gnd) continue;
+      rect(x, y, r1 > .7 ? 2 : 1, 1, r2 > .6 ? P.gravelL : r2 > .25 ? P.gravel : P.snow);
+    }
+    // dust and snow kicked up on landing
+    if (t > lt) {
+      const a = t - lt;
+      const lx = S1.car(lt).x;
+      for (let k = 0; k < 14; k++) {
+        const born = k * .05; if (a < born) continue;
+        const b = a - born, r = R(2 + b * (3 + rnd(k) * 4)), lev = .55 * (1 - b / (1.6 + rnd(k + 4)));
+        if (lev > .05) disc(lx - 16 + (rnd(k + 2) - .5) * 30 - b * 6, BRIGGS.base - 1 - b * (5 + rnd(k + 8) * 6), Math.min(r, 9), k % 3 ? P.gravelL : P.snowSh, lev);
+      }
+    }
+    if (onScreen) drawLoretta(c.x, c.gy, { slope: c.slope, sus: c.sus, air: c.air, spin: t * 18 });
+    // sparks on touchdown
+    if (t > lt && t < lt + .25) for (let k = 0; k < 12; k++) {
+      const a = t - lt, x = S1.car(lt).x - 20 - k * 3 - a * 40 * rnd(k), y = BRIGGS.base - 1 - rnd(k + 9) * 6 - a * 20 + a * a * 80;
+      px(x, y, k % 3 ? P.lamp : P.blaze);
+    }
+    drawBriggsForeground(t);
+    const cr = S1.crow(t);
+    if (cr) drawCrow(cr[0], cr[1], cr[2], t, cr[3]);
+    ctx.restore();
+    // sound
+    AU.wind(.5);
+    const dist = Math.abs(c.x - 160);
+    if (t > 3.4) {
+      const approach = c.x < -40 ? key(t, [[3.4, .05], [S1.carIn, .5]]) : 1 - clamp((c.x - 200) / 260, 0, .9);
+      const shift = frameNo(t) % 18 < 2 && !c.air ? .15 : 0;
+      AU.engine(clamp(approach, 0, 1), c.air ? 1 : clamp(.6 + (1 - dist / 300) * .3 - shift, .4, .95));
+    }
+    if (cue(t, 4.7)) { AU.caw(); AU.flap(); }
+    if (cue(t, lt)) AU.crunch();
+    if (cue(t, 12.1)) { AU.caw(); AU.flap(); }
+    fadeBlack(Math.max(1 - prog(t, 2.9, 3.4), prog(t, 13.4, 13.8)));
+  },
+});
+
+/* =====================================================================
+   PLAYER: render loop, controls, scrubber, export hooks
+   ===================================================================== */
+let T = 0, playing = false, lastNow = 0, lastDrawn = -1;
+
+function render(Tq, cueOn) {
+  const i = sceneIndexAt(Tq), s = SCENES[i];
+  const local = Tq - s.start;
+  G.cueOn = !!cueOn && G.prev >= 0 && Tq > G.prev && Tq - G.prev < .5;
+  G.prevLocal = G.prev - s.start;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  AU.beginFrame();
+  if (!G.cueOn) AU.typed = {};
+  AU.live = !!cueOn;
+  s.draw(local, ctx);
+  AU.endFrame();
+  G.prev = Tq;
+}
+function quant(t) { return Math.floor(t * FPS + 1e-6) / FPS; }
+
+function fit() {
+  if (EXPORT) { cv.style.width = '1920px'; cv.style.height = '1080px'; return; }
+  const k = Math.max(1, Math.floor(Math.min(innerWidth / W, innerHeight / H)));
+  cv.style.width = W * k + 'px'; cv.style.height = H * k + 'px';
+}
+addEventListener('resize', fit); fit();
+
+const ui = document.getElementById('ui'), fill = document.getElementById('fill'), bar = document.getElementById('bar');
+const scnEl = document.getElementById('scn'), clockEl = document.getElementById('clock'), hint = document.getElementById('hint');
+const mmss = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+SCENES.forEach(s => { const d = document.createElement('div'); d.className = 'tick'; d.style.left = (s.start / TOTAL * 100) + '%'; bar.appendChild(d); });
+function updateUI() {
+  const i = sceneIndexAt(T);
+  fill.style.width = (T / TOTAL * 100) + '%';
+  scnEl.textContent = String(i).padStart(2, '0') + '  ' + SCENES[i].title + (AU.muted ? '  [muted]' : '');
+  clockEl.textContent = mmss(T) + ' / ' + mmss(TOTAL);
+}
+function seek(t) { T = clamp(t, 0, TOTAL - 1e-3); G.prev = -1; lastDrawn = -1; }
+function setPlaying(p) {
+  AU.init(); if (AU.ac && AU.ac.state === 'suspended') AU.ac.resume();
+  playing = p; hint.style.display = 'none'; if (p && T >= TOTAL - .01) seek(0);
+  lastNow = performance.now(); poke();
+}
+let idle = 0;
+function poke() { ui.classList.remove('hide'); clearTimeout(idle); idle = setTimeout(() => playing && ui.classList.add('hide'), 2200); }
+addEventListener('mousemove', poke);
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+  else if (e.code === 'ArrowRight') { const i = sceneIndexAt(T); if (i < SCENES.length - 1) seek(SCENES[i + 1].start); poke(); }
+  else if (e.code === 'ArrowLeft') { const i = sceneIndexAt(T); seek(T - SCENES[i].start > 1 || i === 0 ? SCENES[i].start : SCENES[i - 1].start); poke(); }
+  else if (e.code === 'KeyM') { AU.setMuted(!AU.muted); poke(); }
+});
+cv.addEventListener('click', () => setPlaying(!playing));
+let dragging = false;
+const scrubTo = e => { const r = bar.getBoundingClientRect(); seek((e.clientX - r.left) / r.width * TOTAL); };
+bar.addEventListener('mousedown', e => { dragging = true; scrubTo(e); });
+addEventListener('mousemove', e => dragging && scrubTo(e));
+addEventListener('mouseup', () => dragging = false);
+
+function tick(now) {
+  if (playing) { T += (now - lastNow) / 1000; if (T >= TOTAL) { T = TOTAL - 1e-3; playing = false; poke(); } }
+  lastNow = now;
+  const q = quant(T);
+  if (q !== lastDrawn) { render(q, playing); lastDrawn = q; }
+  updateUI();
+  requestAnimationFrame(tick);
+}
+
+// deep links for checking a moment: ?t=12.5 or ?scene=3
+const qs = new URLSearchParams(location.search);
+if (qs.has('t')) seek(parseFloat(qs.get('t')) || 0);
+if (qs.has('scene')) { const s = SCENES[clamp(parseInt(qs.get('scene')) || 0, 0, SCENES.length - 1)]; seek(s.start + (parseFloat(qs.get('at')) || 0)); }
+
+// export hooks: the recorder drives the clock one frame at a time
+window.FILM = { fps: FPS, width: W, height: H, get frames() { return Math.ceil(TOTAL * FPS); }, scenes: SCENES.map(s => ({ id: s.id, title: s.title, start: s.start, duration: s.duration })) };
+window.renderFrame = n => { G.prev = -1; render(n / FPS, false); return true; };
+
+// ?test=font draws the type specimen and a speech bubble instead of the film
+if (qs.get('test') === 'font') {
+  window.renderFrame = n => {
+    const t = n / FPS;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); rect(0, 0, W, H, P.nickel);
+    text('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 6, 6, P.snow);
+    text('abcdefghijklmnopqrstuvwxyz', 6, 17, P.snow);
+    text('0123456789 .,!?\'"-:;()/&+%*=#$£°', 6, 28, P.snow);
+    bubble("Hundred. Four left over crest. Don't cut. Stump inside.", 70, 150, t);
+    bubble('Heard ya.', 250, 150, t - 1.2, { w: 80 });
+    textC('GRAVEL & GLORY', 160, 44, P.gold, 2);
+    return true;
+  };
+  window.renderFrame(48);
+} else if (EXPORT) render(0, false); else requestAnimationFrame(tick);
+</script>
+</body>
+</html>
