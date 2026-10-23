@@ -11,8 +11,9 @@ A 16-bit-style animated retelling of the pilot, drawn and scored entirely in cod
 
 Built in stages.
 - **Stage 1 (done):** the engine and the look; scene 0 (title) and scene 1 (Briggs Grade cold open).
-- **Stage 2 (done):** Michigan, scenes 2 to 6: in the car, Hautamaki Creek, the deer, Dad's Hump (slow motion) and One point nine. Runs to 2:44 so far.
-- Stages 3 to 6 (Calumet, Texas, Scotland, the sound pass and the export script) are still to come.
+- **Stage 2 (done):** Michigan, scenes 2 to 6: in the car, Hautamaki Creek, the deer, Dad's Hump (slow motion) and One point nine. 
+- **Stage 3 (done):** Calumet and the terms, scenes 7 and 8: Fifth Street, the Copper Kettle, the garage party, the office, Ike under the pastor's van, Lake View Cemetery, McLain Beach and the four terms. Runs to 4:49 so far.
+- Stages 4 to 6 (the call and Texas, the car hunt and Scotland, the sound pass and the export script) are still to come.
 
 ## Open and play
 
